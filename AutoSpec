@@ -1,0 +1,440 @@
+#!/bin/bash
+    
+#set -v
+
+####################################################
+#                                                  #
+#   User define configuration.                     #
+#                                                  #
+####################################################
+
+source AutoSpec.cfg
+
+####################################################
+#                                                  #
+#   Default configuration, be careful changes!!!   #
+#                                                  #
+####################################################
+
+MEMORY_LIMIT=2
+STORAGE_LIMIT=50
+
+SERVER=10.228.236.63
+
+####################################################
+#                                                  #
+#   Variable get method, don't change!!!           #
+#                                                  #
+####################################################
+
+HARDWARE_MODEL=`dmidecode | grep -A 5 "System Information" | grep "Product Name" | cut -d " " -f 3`
+HARDWARE_MANUFACTURER=`dmidecode | grep -A 5 "System Information" | grep "Manufacturer" | cut -d " " -f 2`
+
+HARDWARE_CPU_NAME=`awk 'BEGIN { CPU=None } /^model name/ { CPU=$4" "$5" "$7; exit } END { print CPU } ' /proc/cpuinfo`
+HARDWARE_CPU_HYPERTHREADING=`awk '{ if($0~/siblings/) { A=$3 } else if($0~/cpu cores/) { B=$4 }} END { STATE=A/B; print STATE }' /proc/cpuinfo`
+HARDWARE_CPU_CHIPS=`dmidecode | grep "Processor Information" | wc -l`
+HARDWARE_CPU_CORES_PER_CHIP=`awk '/^cpu cores/ { print $4; exit}' /proc/cpuinfo`
+HARDWARE_CPU_CORES=`expr $HARDWARE_CPU_CORES_PER_CHIP \* $HARDWARE_CPU_CHIPS`
+HARDWARE_CPU_THREADS_PER_CHIP=`expr $HARDWARE_CPU_CORES \* $HARDWARE_CPU_HYPERTHREADING`
+HARDWARE_CPU_FREQUENCY=`dmidecode | grep "Current Speed" | head -n 1 | cut -d " " -f 3`
+HARDWARE_CPU_FPU_STATE=`awk '/^fpu/ { if($3~/yes/) { print "Integrated" } else { print "None" }; exit }' /proc/cpuinfo`
+HARDWARE_CPU_FIRST_ICACHE=`sed 's/K/ KB/g' /sys/devices/system/cpu/cpu0/cache/index0/size`
+HARDWARE_CPU_FIRST_DCACHE=`sed 's/K/ KB/g' /sys/devices/system/cpu/cpu0/cache/index1/size`
+HARDWARE_CPU_SECOND_CACHE=`sed 's/K/ KB/g' /sys/devices/system/cpu/cpu0/cache/index2/size`
+HARDWARE_CPU_THIRD_CACHE=`sed 's/K/ KB/g' /sys/devices/system/cpu/cpu0/cache/index3/size`
+
+HARDWARE_MEMORY_INFO=`dmidecode | grep -A 12 "Memory Device" | awk 'BEGIN { SIZE=0 } /Size.+MB/ { SIZE=SIZE+$2 } END { print SIZE/1024"GB" }'`
+
+COMPILER_GCC_PATH=`whereis gcc | awk '{ if(NF>1) { print $2 }}'`
+COMPILER_GCC_CPLUS_PATH=`whereis g++ | awk '{ if(NF>1) { print $2 }}'`
+COMPILER_GCC_FORTRAN_PATH=`whereis gfortran | awk '{ if(NF>1) { print $2 }}'`
+
+SOFTWARE_OS_EDITION=`head -n 1 /etc/redhat-release`
+SOFTWARE_OS_VERSION=`awk '{ split($3,VERSION,"."); print VERSION[1] }' /etc/redhat-release`
+SOFTWARE_OS_RUNLEVEL=`runlevel | cut -d " " -f 2`
+SOFTWARE_OS_FILESYSTEM=`df -T / | awk '/dev/ { print $2 }'`
+SOFTWARE_COMPILER_VERSION=`rpm -q gcc | cut -d "-" -f 2`
+SOFTWARE_COMPILER_VERSION_SHORT=`echo $SOFTWARE_COMPILER_VERSION | awk -F. '{ print $1""$2 }'`
+
+SPEC_DATA_DIRECTORY=${ROOT_DIRECTORY}/result
+SPEC_CONFIG_DIRECTORY=${ROOT_DIRECTORY}/config
+SPEC_CONFIG_EXT=spec2006.linux64.gcc${SOFTWARE_COMPILER_VERSION}.${UUID}.`date +"%d%b%Y"`
+SPEC_CONFIG_EXT_SHORT=spec2006.linux64.gcc${SOFTWARE_COMPILER_VERSION_SHORT}.`date +"%d%b%Y"`
+SPEC_CONFIG_FILE=${SPEC_CONFIG_DIRECTORY}/${SPEC_CONFIG_EXT_SHORT}.cfg
+SPEC_COPIES_NUMBER=`numactl --hardware 2> /dev/null | awk '/^available/ { print $2 }'`
+
+SPEC_RESULT_FILE=${SPEC_DATA_DIRECTORY}/${SPEC_CONFIG_EXT_SHORT}.csv
+
+####################################################
+#                                                  #
+#   User defined methods, don't change!!!          #
+#                                                  #
+####################################################
+
+function logging {
+    echo -e "$1"
+
+}
+
+function feedback {
+    if [ $1 != 0 ];then
+        echo $2; exit 1
+    fi
+
+}
+
+function doAppCheck {
+    rpm -q $1 | awk -F"-" '
+        BEGIN {OUTPUT="NO"; EXIT=1}
+        {
+            if($0~APP) { OUTPUT="OK"; EXIT=0 } else { OUTPUT="NO"; EXIT=1 }
+        }
+        END { print OUTPUT; exit EXIT }
+    ' APP=$1
+
+}
+
+function doNumaBound {
+    # if Processor is not NUMA, skip create bind string.
+    if [ $SPEC_COPIES_NUMBER -gt "1" ];then
+        numactl --hardware | awk '
+            BEGIN {NUM=0}
+            /node [0-9]+ cpus:/ { print "bind"NUM"  = numactl -m "$2" --physcpubind="$NR; NUM++ }
+        '
+    fi
+
+}
+
+
+function doEnvCheck {
+    logging "Check System Version and Hardware Resources :"
+
+    logging "\tSystem:  \c"
+    echo $SOFTWARE_OS_VERSION | awk '{ if($1>=5) { print "OK"; exit 0 } else { print "NO"; exit 1 } }'
+    feedback $? "ERROR: Current system is not support."
+
+    logging "\tStorage:  \c"
+    df -lh $ROOT_DIRECTORY | awk '{ DIRSIZE=$4 } END { gsub("G", "", DIRSIZE); if(DIRSIZE>=SIZE) { print "OK"; exit 0 } else { print "NO"; exit 1 }}' SIZE=${STORAGE_LIMIT}
+    feedback $? "ERROR: Storage Resources is not enough."
+
+    logging "\tMemory:  \c"
+    free -g | awk '{ if($1~/Mem/) { MEM=$2; if(MEM>MEMORY_LIMIT) { print "OK"; exit 0 } else { print "NO"; exit 1 } } }' MEMORY_LIMIT=${MEMORY_LIMIT}
+    feedback $? "ERROR: Memory Resources is not enough."
+
+}
+
+
+function doEnvDeploy {
+    logging "Configure System Environment"
+    
+    logging "\tUpdate system."
+    # wget -qO /etc/yum.repos.d/XEN.repo http://${SERVER}/soft/XEN.repo
+    # feedback $? "ERROR: Can't connect to soft server."
+    yum update -qy >> /dev/null
+    
+    logging "\tInstall Compiler Environment."
+    yum install -qy gcc gcc-c++ gcc-gfortran >> /dev/null
+    
+    logging "\tInstall System Utilites."
+    yum install -qy mutt lvm2 screen lrzsz dmidecode wget openssh openssh-clients >> /dev/null
+    wget -qO /tmp/numactl-2.0.3.tar.gz ftp://oss.sgi.com/www/projects/libnuma/download/numactl-2.0.3.tar.gz
+    tar xf /tmp/numactl-2.0.3.tar.gz
+    cd /tmp/numactl-2.0.3 && make --quiet && make install --quiet
+
+    logging "\tStart System Service."
+    service sendmail start >> /dev/null
+    
+    # logging "\tInstall XEN Environment."
+    # yum install -qy xen kernel-xen xen-libs >> /dev/null
+    
+    logging "\tCreate application directory."
+    mkdir -p $ROOT_DIRECTORY
+    feedback $? "ERROR: Can't create application directory."
+    
+    logging "Install SPEC2006"
+    logging "\tDownload SPEC2006 ISO."
+    wget -qO ${ROOT_DIRECTORY}/SPEC2006-1.1.ISO http://${SERVER}/soft/SPEC2006-1.1.ISO
+    feedback $? "ERROR: Can't connect to soft server."
+    wget -qO ${ROOT_DIRECTORY}/SPEC2006-1.1.ISO.MD5 http://${SERVER}/soft/SPEC2006-1.1.ISO.MD5
+    feedback $? "ERROR: Can't connect to soft server."
+    cd ${ROOT_DIRECTORY}; feedback $? "Enter $ROOT_DIRECTORY failure."
+    logging "\tAccuracy verification"
+    md5sum -c ${ROOT_DIRECTORY}/SPEC2006-1.1.ISO.MD5
+    feedback $? "SPEC2006.ISO download error."
+    logging "\tInstall SPEC2006"
+    mkdir -p ${ROOT_DIRECTORY}/TMP
+    mount -o loop ${ROOT_DIRECTORY}/SPEC2006-1.1.ISO ${ROOT_DIRECTORY}/TMP
+    feedback $? "Mount SPEC2006.ISO error."
+    bash ${ROOT_DIRECTORY}/TMP/install.sh -f -d ${ROOT_DIRECTORY}
+    
+    echo "If the SPEC2006 install succeed, Please enter 'yes'."
+    read ans
+    if [ $ans != "yes" ];then
+        echo "SPEC2006 install fail, exit."
+    fi
+
+}
+
+function doDeployCheck {
+    logging "Check Utility Program:"
+    logging "\tLVM:  \c"
+    doAppCheck lvm2
+    feedback $? "ERROR: LVM does not exist."
+    logging "\tMUTT:  \c"
+    doAppCheck mutt
+    feedback $? "ERROR: MUTT does not exist."
+    logging "\tWGET:  \c"
+    doAppCheck wget
+    feedback $? "ERROR: WGET does not exist."
+    logging "\tNUMACTL:  \c"
+    doAppCheck numactl
+    feedback $? "ERROR: NUMACTL does not exist."
+    logging "\tDMIDECODE:  \c"
+    doAppCheck dmidecode
+    feedback $? "ERROR: DMIDECODE does not exist."
+
+    logging "Check Compiler Environment:"
+    logging "\tGCC:  \c"
+    doAppCheck gcc
+    feedback $? "ERROR: GCC does not exist."
+    logging "\tGCC-C++:  \c"
+    doAppCheck gcc-c++
+    feedback $? "ERROR: GCC-C++ does not exist."
+    logging "\tGCC-FORTRANT:  \c"
+    doAppCheck gcc-gfortran
+    feedback $? "ERROR: GCC-FORTRANT does not exist."
+
+}
+
+
+function doConfigCreate {
+    [ -f ${SPEC_CONFIG_FILE} ] && mv -f ${SPEC_CONFIG_FILE} ${SPEC_CONFIG_FILE}.`date +"%d%b%Y"`
+    grep -sl $UUID ${SPEC_DATA_DIRECTORY}/CPU2006.*.log | wc -l | awk '{ exit $1 }'
+    feedback $? "ERROR: Existing UUID, Please reconfigure."
+
+cat << EOF >> $SPEC_CONFIG_FILE 
+#####################################################################
+##                                                                  #
+##  SPEC2006 configuration file for GrandCloud ECU testing.         #
+##  Auto create by AutoSpec.                                        #
+##                                                                  # 
+#####################################################################
+
+ignore_errors = yes
+tune          = base
+rate          = 1
+runlist       = all ^429 ^462 ^458  ^410 ^416 ^434 ^436 ^437 ^444 ^450 ^454 ^459 ^465 ^470 ^481
+copies        = $SPEC_COPIES_NUMBER
+output_format = all 
+ext           = $SPEC_CONFIG_EXT 
+reportable    = 0
+teeout        = yes
+teerunout     = yes
+test_sponsor  = GrandCloud
+prepared_by   = wangruoyan@snda.com
+tester        = $TESTER 
+
+EOF
+
+doNumaBound >> $SPEC_CONFIG_FILE 
+
+cat << EOF >> $SPEC_CONFIG_FILE 
+submit = echo "\$command" > run.sh ; $BIND bash run.sh
+
+default=default=default=default:
+
+#####################################################################
+#                                                                   #
+# Compiler Selection                                                #
+#                                                                   #
+#####################################################################
+
+CC           = $COMPILER_GCC_PATH
+CXX          = $COMPILER_GCC_CPLUS_PATH
+FC           = $COMPILER_GCC_FORTRAN_PATH 
+
+#####################################################################
+#                                                                   #
+# Hardware Parameters                                               #
+#                                                                   #
+#####################################################################
+
+hw_model     = $HARDWARE_MANUFACTURER $HARDWARE_MODEL 
+hw_cpu_name  = $HARDWARE_CPU_NAME 
+hw_cpu_char  = None
+hw_cpu_mhz   = $HARDWARE_CPU_FREQUENCY
+hw_fpu       = $HARDWARE_CPU_FPU_STATE 
+hw_ncores	   = $HARDWARE_CPU_CORES
+hw_nchips	   = $HARDWARE_CPU_CHIPS
+hw_ncoresperchip   = $HARDWARE_CPU_CORES_PER_CHIP
+hw_nthreadspercore = $HARDWARE_CPU_THREADS_PER_CHIP 
+hw_ncpuorder = $HARDWARE_CPU_CHIPS chip
+hw_pcache    = $HARDWARE_CPU_FIRST_ICACHE I + $HARDWARE_CPU_FIRST_DCACHE D on chip per chip
+hw_scache    = $HARDWARE_CPU_SECOND_CACHE I+D on chip per chip
+hw_tcache    = $HARDWARE_CPU_THIRD_CACHE 
+hw_ocache    = None
+hw_memory    = $HARDWARE_MEMORY_INFO 
+hw_disk      = SAS/SATA
+hw_vendor    = $HARDWARE_MANUFACTURER 
+
+#####################################################################
+#                                                                   #
+# Software Parameters                                               #
+#                                                                   #
+#####################################################################
+
+sw_os        = $SOFTWARE_OS_EDITION 
+sw_file      = $SOFTWARE_OS_FILESYSTEM
+sw_state     = runlevel $SOFTWARE_OS_RUNLEVEL
+sw_compiler  = gcc , g++ & gfortran $SOFTWARE_COMPILER_VERSION
+sw_avail     = Dec-9999
+sw_other     = None
+sw_base_ptrsize    = 64-bit 
+sw_peak_ptrsize    = Not Applicable
+
+#####################################################################
+#                                                                   #
+# Optimization                                                      #
+#                                                                   #
+#####################################################################
+
+default=base=default=default:
+COPTIMIZE    = $COMPILER_GCC_OPTIMIZE
+CXXOPTIMIZE  = $COMPILER_GCC_CPLS_OPTIMIZE
+FOPTIMIZE    = $COMPILER_GCC_FORTRAN_OPTIMIZE
+
+#####################################################################
+#                                                                   #
+# 32/64 bit Portability Flags - all                                 #
+#                                                                   #
+#####################################################################
+
+default=base=default=default:
+PORTABILITY = -DSPEC_CPU_LP64
+
+#####################################################################
+#                                                                   #
+# Portability Flags                                                 #
+#                                                                   #
+#####################################################################
+
+400.perlbench=default=default=default:
+CPORTABILITY = -DSPEC_CPU_LINUX_X64
+
+462.libquantum=default=default=default:
+CPORTABILITY=  -DSPEC_CPU_LINUX
+
+483.xalancbmk=default=default=default:
+CXXPORTABILITY= -DSPEC_CPU_LINUX
+
+481.wrf=default=default=default:
+CPORTABILITY = -DSPEC_CPU_CASE_FLAG -DSPEC_CPU_LINUX
+EOF
+
+}
+
+
+function doSpecExecute {
+    cd ${ROOT_DIRECTORY}
+    source ${ROOT_DIRECTORY}/shrc
+
+    #set stack limit
+    ulimit -s unlimited
+
+    #limit the locked pages in memory 
+    ulimit -l 2097152
+
+    runspec -config=$SPEC_CONFIG_FILE
+
+}
+
+
+function doDataAnalysis {
+    ORDINAL=`grep -sl $UUID ${SPEC_DATA_DIRECTORY}/CPU2006.*.log | awk 'BEGIN { ID=0;FS="." } { if(ID<$2) { ID=$2 }} END { print ID }'`
+
+    eval $(awk '
+
+        BEGIN { PERLBENCH=BZIP2=GCC=GOBMK=HMMER=H264REF=OMNETPP=ASTAR=XALANCBMK=0 }
+
+        {
+            if ($1~/400.perlbench/ && NF == 5)      FRUIT["PERLBENCH"]=$4
+            else if ($1~/401.bzip2/ && NF == 5)     FRUIT["BZIP2"]=$4
+            else if ($1~/403.gcc/ && NF == 5)       FRUIT["GCC"]=$4
+            else if ($1~/445.gobmk/ && NF == 5)     FRUIT["GOBMK"]=$4
+            else if ($1~/456.hmmer/ && NF == 5)     FRUIT["HMMER"]=$4
+            else if ($1~/464.h264ref/ && NF == 5)   FRUIT["H264REF"]=$4
+            else if ($1~/471.omnetpp/ && NF == 5)   FRUIT["OMNETPP"]=$4
+            else if ($1~/473.astar/ && NF == 5)     FRUIT["ASTAR"]=$4
+            else if ($1~/483.xalancbmk/ && NF == 5) FRUIT["XALANCBMK"]=$4
+        }
+
+        END { for(k in FRUIT) { print k"="FRUIT[k]/COPIES }}
+
+    ' COPIES=$HARDWARE_CPU_CHIPS ${SPEC_DATA_DIRECTORY}/CINT2006.${ORDINAL}.ref.txt)
+
+    eval $(awk '
+
+        BEGIN { MILC=GROMACS=DEAL2=POVRAY=0 }
+
+        {
+            if ($1~/433.milc/ && NF == 5)           FRUIT["MILC"]=$4
+            else if ($1~/435.gromacs/ && NF == 5)   FRUIT["GROMACS"]=$4
+            else if ($1~/447.dealII/ && NF == 5)    FRUIT["DEAL2"]=$4
+            else if ($1~/453.povray/ && NF == 5)    FRUIT["POVRAY"]=$4
+        }
+
+        END { for(k in FRUIT) { print k"="FRUIT[k]/COPIES }}
+
+    ' COPIES=${HARDWARE_CPU_CHIPS} ${SPEC_DATA_DIRECTORY}/CFP2006.${ORDINAL}.ref.txt)
+
+    echo "400. Perlbench,401. Bzip2,403. Gcc,445. Gobmk,456. Hmmer,464. H264ref,471. Omnetpp,473. Astar,483. Xalancbmk,GroupScores,433. Milc,435. Gromacs,447. DealII,453. Povray,GroupScores" > $SPEC_RESULT_FILE
+    echo "${PERLBENCH},${BZIP2},${GCC},${GOBMK},${HMMER},${H264REF},${OMNETPP},${ASTAR},${XALANCBMK},,${MILC},${GROMACS},${DEAL2},${POVRAY}," >> $SPEC_RESULT_FILE
+
+    echo -e "Hi,\n    This is ${SPEC_CONFIG_EXT_SHORT} Performance results.\n\nAutoSpec." | mutt -s "${SPEC_CONFIG_EXT_SHORT} fruit." ${TESTER} -a $SPEC_RESULT_FILE
+
+}
+
+
+
+####################################################
+#                                                  #
+#   Main Program, don't change!!!                  #
+#                                                  #
+####################################################
+
+case "$1" in
+    -all)
+    doEnvCheck
+    doEnvDeploy
+    doDeployCheck
+    doConfigCreate
+    doSpecExecute
+    doDataAnalysis
+    ;;
+    -deploy)
+    doEnvCheck
+    doEnvDeploy
+    doDeployCheck
+    ;;
+    -create)
+    doConfigCreate
+    ;;
+    -run) 
+    doSpecExecute
+    ;; 
+    -again)
+    doConfigCreate
+    doSpecExecute
+    doDataAnalysis
+    ;;
+    *)
+cat << EOF
+  usage:
+    -all     to execute benchmark and analyse results.
+    -deploy  to deploy environment.
+    -create  to create a profile.
+    -run     to execute benchmark.
+    -again   to execute benchmark again.
+EOF
+    ;;
+esac
