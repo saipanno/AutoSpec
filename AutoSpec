@@ -114,7 +114,7 @@ function doEnvCheck {
     feedback $? "ERROR: Current system is not support."
 
     logging "\tStorage:  \c"
-    df -lh $ROOT_DIRECTORY | awk '{ DIRSIZE=$4 } END { gsub("G", "", DIRSIZE); if(DIRSIZE>=SIZE) { print "OK"; exit 0 } else { print "NO"; exit 1 }}' SIZE=${STORAGE_LIMIT}
+    df -lhP $ROOT_DIRECTORY | awk '{ DIRSIZE=$4 } END { gsub("G", "", DIRSIZE); if(DIRSIZE>=SIZE) { print "OK"; exit 0 } else { print "NO"; exit 1 }}' SIZE=${STORAGE_LIMIT}
     feedback $? "ERROR: Storage Resources is not enough."
 
     logging "\tMemory:  \c"
@@ -128,8 +128,6 @@ function doEnvDeploy {
     logging "Configure System Environment"
     
     logging "\tUpdate system."
-    # wget -qO /etc/yum.repos.d/XEN.repo http://${SERVER}/soft/XEN.repo
-    # feedback $? "ERROR: Can't connect to soft server."
     yum update -qy >> /dev/null
     
     logging "\tInstall Compiler Environment."
@@ -143,9 +141,6 @@ function doEnvDeploy {
 
     logging "\tStart System Service."
     service sendmail start >> /dev/null
-    
-    # logging "\tInstall XEN Environment."
-    # yum install -qy xen kernel-xen xen-libs >> /dev/null
     
     logging "\tCreate application directory."
     mkdir -p $ROOT_DIRECTORY
