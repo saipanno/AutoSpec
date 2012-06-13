@@ -19,7 +19,7 @@ source AutoSpec.cfg
 MEMORY_LIMIT=2
 STORAGE_LIMIT=50
 
-SERVER=10.228.236.63
+SERVER=10.228.235.120
 
 ####################################################
 #                                                  #
