@@ -114,6 +114,7 @@ function doEnvCheck {
     feedback $? "ERROR: Current system is not support."
 
     logging "\tStorage:  \c"
+    mkdir -p $ROOT_DIRECTORY
     df -lhP $ROOT_DIRECTORY | awk '{ DIRSIZE=$4 } END { gsub("G", "", DIRSIZE); if(DIRSIZE>=SIZE) { print "OK"; exit 0 } else { print "NO"; exit 1 }}' SIZE=${STORAGE_LIMIT}
     feedback $? "ERROR: Storage Resources is not enough."
 
@@ -128,13 +129,13 @@ function doEnvDeploy {
     logging "Configure System Environment"
     
     logging "\tUpdate system."
-    yum update -qy >> /dev/null
+    yum update -q -y >> /dev/null
     
     logging "\tInstall Compiler Environment."
-    yum install -qy gcc gcc-c++ gcc-gfortran >> /dev/null
+    yum install -q -y gcc gcc-c++ gcc-gfortran >> /dev/null
     
     logging "\tInstall System Utilites."
-    yum install -qy mutt lvm2 screen lrzsz dmidecode wget openssh openssh-clients >> /dev/null
+    yum install -q -y mutt lvm2 screen lrzsz dmidecode wget openssh openssh-clients >> /dev/null
     wget -qO /tmp/numactl-2.0.3.tar.gz ftp://oss.sgi.com/www/projects/libnuma/download/numactl-2.0.3.tar.gz
     tar xf /tmp/numactl-2.0.3.tar.gz
     cd /tmp/numactl-2.0.3 && make --quiet && make install --quiet
