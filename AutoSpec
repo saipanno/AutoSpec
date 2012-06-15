@@ -23,6 +23,16 @@ SERVER=10.228.235.120
 
 ####################################################
 #                                                  #
+# Variable get method, don't change!!!             #
+#                                                  #
+####################################################
+
+yum install dmidecode
+mkdir -p $ROOT_DIRECTORY
+
+
+####################################################
+#                                                  #
 #   Variable get method, don't change!!!           #
 #                                                  #
 ####################################################
@@ -114,7 +124,6 @@ function doEnvCheck {
     feedback $? "ERROR: Current system is not support."
 
     logging "\tStorage:  \c"
-    mkdir -p $ROOT_DIRECTORY
     df -lhP $ROOT_DIRECTORY | awk '{ DIRSIZE=$4 } END { gsub("G", "", DIRSIZE); if(DIRSIZE>=SIZE) { print "OK"; exit 0 } else { print "NO"; exit 1 }}' SIZE=${STORAGE_LIMIT}
     feedback $? "ERROR: Storage Resources is not enough."
 
@@ -142,10 +151,6 @@ function doEnvDeploy {
 
     logging "\tStart System Service."
     service sendmail start >> /dev/null
-    
-    logging "\tCreate application directory."
-    mkdir -p $ROOT_DIRECTORY
-    feedback $? "ERROR: Can't create application directory."
     
     logging "Install SPEC2006"
     logging "\tDownload SPEC2006 ISO."
