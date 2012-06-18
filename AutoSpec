@@ -21,21 +21,14 @@ STORAGE_LIMIT=50
 
 SERVER=10.228.235.120
 
-####################################################
-#                                                  #
-# Variable get method, don't change!!!             #
-#                                                  #
-####################################################
-
-yum install dmidecode
-mkdir -p $ROOT_DIRECTORY
-
 
 ####################################################
 #                                                  #
 #   Variable get method, don't change!!!           #
 #                                                  #
 ####################################################
+
+mkdir -p $ROOT_DIRECTORY
 
 HARDWARE_MODEL=`dmidecode | grep -A 5 "System Information" | grep "Product Name" | cut -d " " -f 3`
 HARDWARE_MANUFACTURER=`dmidecode | grep -A 5 "System Information" | grep "Manufacturer" | cut -d " " -f 2`
@@ -144,10 +137,7 @@ function doEnvDeploy {
     yum install -q -y gcc gcc-c++ gcc-gfortran >> /dev/null
     
     logging "\tInstall System Utilites."
-    yum install -q -y mutt lvm2 screen lrzsz dmidecode wget openssh openssh-clients >> /dev/null
-    wget -qO /tmp/numactl-2.0.3.tar.gz ftp://oss.sgi.com/www/projects/libnuma/download/numactl-2.0.3.tar.gz
-    tar xf /tmp/numactl-2.0.3.tar.gz
-    cd /tmp/numactl-2.0.3 && make --quiet && make install --quiet
+    yum install -q -y mutt lvm2 screen lrzsz dmidecode wget openssh openssh-clients numactl >> /dev/null
 
     logging "\tStart System Service."
     service sendmail start >> /dev/null
